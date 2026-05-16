@@ -2,6 +2,7 @@ import { create } from "zustand"
 import type {
   ChatMessage, ChatSession, AgentRecord, AppNotification,
   TabId, PageView, TaskPhase, ClarifyCard, BuildPlan, TaskResult, TaskState,
+  PermissionType, PermissionStatus, ImageAttachment,
 } from "@/types"
 
 /* ───────── Demo task flow data ───────── */
@@ -90,6 +91,7 @@ const SEED_AGENTS: AgentRecord[] = [
       { label: "通过邮件发送报告", done: false },
     ],
     runCount: 5, lastRunAt: now, sessions: [],
+    status: "running", pinned: true,
     runLogs: [
       { id: "run-1", title: "完成《文瑞临 vs 叶阳天 Twin 研发工程师岗位双向对比分析报告》", result: "已以格式化 HTML 邮件形式发送至您的邮箱", taskCount: 4, totalTasks: 5, timestamp: new Date(Date.now() - 2640000), tokenUsage: 203 },
       { id: "run-2", title: "完成《Twin AI 产品经理面试题库（精选10题）》", result: "PDF 已生成并发送至 1036758961@qq.com", taskCount: 2, totalTasks: 5, timestamp: new Date(Date.now() - 10800000), tokenUsage: 100 },
@@ -102,6 +104,7 @@ const SEED_AGENTS: AgentRecord[] = [
     workflow: ["理解写作需求", "搜集相关素材", "生成初稿", "优化润色", "格式化输出"],
     checklist: [],
     runCount: 0, lastRunAt: now, sessions: [], runLogs: [],
+    status: "pending",
   },
   {
     id: "agent-code", name: "编程助手", description: "代码编写与调试",
@@ -109,6 +112,7 @@ const SEED_AGENTS: AgentRecord[] = [
     workflow: ["分析需求", "编写代码", "运行测试", "调试优化", "输出文档"],
     checklist: [],
     runCount: 0, lastRunAt: now, sessions: [], runLogs: [],
+    status: "ready",
   },
 ]
 
@@ -134,6 +138,7 @@ function syncSession(get: () => AppState, set: (fn: (s: AppState) => Partial<App
   if (!state.activeSessionId || state.messages.length === 0) return
   const firstUser = state.messages.find((m) => m.role === "user")
   const last = state.messages[state.messages.length - 1]
+  const existing = state.sessions.find((ss) => ss.id === state.activeSessionId)
   const sess: ChatSession = {
     id: state.activeSessionId,
     title: firstUser?.content.slice(0, 20) ?? "新对话",
@@ -142,7 +147,8 @@ function syncSession(get: () => AppState, set: (fn: (s: AppState) => Partial<App
     messages: state.messages,
     taskState: state.taskState,
     taskPhases: state.taskPhases.length > 0 ? state.taskPhases : undefined,
-    color: "#4F6EF7",
+    taskResult: existing?.taskResult,
+    color: existing?.color ?? "#4F6EF7",
   }
   set((s) => ({ sessions: [sess, ...s.sessions.filter((ss) => ss.id !== sess.id)] }))
 }
@@ -165,11 +171,47 @@ function streamText(full: string, onUpdate: (t: string) => void, onDone: () => v
   return () => clearInterval(timer)
 }
 
-let counter = 0
+let activeStreamCleanups = new Map<string, () => void>()
+
+function trackStream(key: string, full: string, onUpdate: (t: string) => void, onDone: () => void) {
+  const existing = activeStreamCleanups.get(key)
+  if (existing) existing()
+  const cleanup = streamText(full, onUpdate, () => {
+    activeStreamCleanups.delete(key)
+    onDone()
+  })
+  activeStreamCleanups.set(key, cleanup)
+}
+
+function clearAllStreams() {
+  activeStreamCleanups.forEach((cleanup) => cleanup())
+  activeStreamCleanups.clear()
+}
+
+let currentExecutionId = 0
+
+function uid() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+}
+
+const VALID_TASK_TRANSITIONS: Partial<Record<TaskState, TaskState[]>> = {
+  idle: ["clarifying"],
+  clarifying: ["confirming", "idle"],
+  confirming: ["authorizing", "executing", "idle"],
+  authorizing: ["executing", "idle"],
+  executing: ["paused", "completed", "authorizing", "idle"],
+  paused: ["executing", "idle", "completed"],
+  completed: ["clarifying", "idle"],
+}
+
+export function safeTransition(from: TaskState, to: TaskState): boolean {
+  return VALID_TASK_TRANSITIONS[from]?.includes(to) ?? false
+}
 
 /* ───────── Store ───────── */
 interface AppState {
   pageView: PageView
+  pageHistory: PageView[]
   activeTab: TabId
   sessions: ChatSession[]
   activeSessionId: string | null
@@ -180,14 +222,22 @@ interface AppState {
   notifications: AppNotification[]
   isLoggedIn: boolean
   showLogin: boolean
+  loginDismissed: boolean
+  phoneNumber: string
   showAgreement: boolean
   taskState: TaskState
   taskPhases: TaskPhase[]
   taskPaused: boolean
+  executionId: number
   detailAgentId: string | null
   clarifyStep: number
   toastNotification: { title: string; desc: string; sessionId?: string } | null
   activeResult: TaskResult | null
+  keyboardOpen: boolean
+  permissions: Record<PermissionType, PermissionStatus>
+  activePermission: PermissionType | null
+  permissionQueue: PermissionType[]
+  permissionsInitialized: boolean
 
   setPageView: (v: PageView) => void
   setActiveTab: (t: TabId) => void
@@ -205,21 +255,34 @@ interface AppState {
   goBack: () => void
   setIsLoggedIn: (v: boolean) => void
   setShowLogin: (v: boolean) => void
+  dismissLogin: () => void
+  loginWithPhone: (phone: string) => void
   setShowAgreement: (v: boolean) => void
   openAgentDetail: (id: string) => void
+  toggleAgentPin: (id: string) => void
   resendMessage: (msgId: string) => void
   deleteMessages: (ids: string[]) => void
   dismissToast: () => void
   openResultDetail: (result: TaskResult) => void
   markNotificationsRead: () => void
   openProgressDetail: () => void
+  setKeyboardOpen: (v: boolean) => void
+  sendImages: (images: ImageAttachment[]) => void
+  requestPermission: (type: PermissionType) => void
+  requestPermissions: (types: PermissionType[]) => void
+  respondPermission: (status: PermissionStatus) => void
+  initPermissions: () => void
+  checkPermission: (type: PermissionType) => PermissionStatus
 }
 
+const initialSessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+
 export const useChatStore = create<AppState>((set, get) => ({
-  pageView: "tabs",
-  activeTab: "chat",
+  pageView: "conversation",
+  pageHistory: [],
+  activeTab: "create",
   sessions: SEED_SESSIONS,
-  activeSessionId: null,
+  activeSessionId: initialSessionId,
   messages: [],
   isTyping: false,
   inputValue: "",
@@ -227,69 +290,160 @@ export const useChatStore = create<AppState>((set, get) => ({
   notifications: SEED_NOTIFICATIONS,
   isLoggedIn: false,
   showLogin: false,
-  showAgreement: true,
+  loginDismissed: false,
+  phoneNumber: "",
+  showAgreement: false,
   taskState: "idle",
   taskPhases: [],
   taskPaused: false,
+  executionId: 0,
   detailAgentId: null,
   clarifyStep: 0,
   toastNotification: null,
   activeResult: null,
+  keyboardOpen: false,
+  permissions: {
+    network: "not-requested",
+    tracking: "not-requested",
+    notifications: "not-requested",
+    camera: "not-requested",
+    microphone: "not-requested",
+    location: "not-requested",
+    photos: "not-requested",
+  },
+  activePermission: null,
+  permissionQueue: [],
+  permissionsInitialized: false,
 
   setPageView: (v) => set({ pageView: v }),
   setActiveTab: (t) => set({ activeTab: t }),
   setInputValue: (v) => set({ inputValue: v }),
   setIsLoggedIn: (v) => set({ isLoggedIn: v }),
   setShowLogin: (v) => set({ showLogin: v }),
+  dismissLogin: () => set({ showLogin: false, loginDismissed: true }),
+  loginWithPhone: (phone) => set({ isLoggedIn: true, showLogin: false, loginDismissed: true, phoneNumber: phone }),
   setShowAgreement: (v) => set({ showAgreement: v }),
-  openAgentDetail: (id) => set({ pageView: "agent-detail", detailAgentId: id }),
+  openAgentDetail: (id) => set((s) => ({ pageView: "agent-detail", detailAgentId: id, pageHistory: [...s.pageHistory, s.pageView] })),
+  toggleAgentPin: (id) => set((s) => ({ agents: s.agents.map((a) => a.id === id ? { ...a, pinned: !a.pinned } : a) })),
   dismissToast: () => set({ toastNotification: null }),
-  openResultDetail: (result) => set({ pageView: "result-detail", activeResult: result }),
+  openResultDetail: (result) => set((s) => ({ pageView: "result-detail", activeResult: result, pageHistory: [...s.pageHistory, s.pageView] })),
   markNotificationsRead: () => set((s) => ({ notifications: s.notifications.map((n) => ({ ...n, read: true })) })),
-  openProgressDetail: () => set({ pageView: "agent-detail", detailAgentId: "agent-research" }),
+  openProgressDetail: () => set((s) => ({ pageView: "progress-detail", pageHistory: [...s.pageHistory, s.pageView] })),
+  setKeyboardOpen: (v) => set({ keyboardOpen: v }),
 
-  goBack: () => {
-    const s = get()
-    if (s.pageView === "agent-detail") {
-      set({ pageView: s.activeSessionId ? "conversation" : "tabs", detailAgentId: null })
-      return
+  sendImages: (images) => {
+    let sid = get().activeSessionId
+    if (!sid) { sid = `session-${uid()}`; set((s) => ({ activeSessionId: sid, pageView: "conversation", pageHistory: [...s.pageHistory, s.pageView] })) }
+
+    const userMsg: ChatMessage = {
+      id: `msg-${Date.now()}-img`, role: "user",
+      content: images.length === 1 ? "发送了一张图片" : `发送了 ${images.length} 张图片`,
+      timestamp: new Date(), status: "sending", images,
     }
-    if (s.pageView === "result-detail") { set({ pageView: "conversation", activeResult: null }); return }
-    if (s.pageView === "progress-detail") { set({ pageView: "conversation" }); return }
-    if (s.pageView === "conversation") {
-      if (s.activeSessionId && s.messages.length > 0) {
-        const firstUser = s.messages.find((m) => m.role === "user")
-        const sess: ChatSession = {
-          id: s.activeSessionId, title: firstUser?.content.slice(0, 20) ?? "新对话",
-          lastMessage: s.messages[s.messages.length - 1]?.content.slice(0, 40) ?? "",
-          updatedAt: new Date(), messages: s.messages, taskState: s.taskState, color: "#4F6EF7",
-          taskPhases: s.taskPhases.length > 0 ? s.taskPhases : undefined,
-        }
-        set((st) => ({ sessions: [sess, ...st.sessions.filter((ss) => ss.id !== sess.id)] }))
-      }
-      const isExecuting = s.taskState === "executing" || s.taskState === "authorizing"
-      set({
-        pageView: "tabs", activeSessionId: null, messages: [], isTyping: false,
-        taskState: isExecuting ? s.taskState : "idle",
-        taskPhases: isExecuting ? s.taskPhases : [],
-        taskPaused: false, clarifyStep: 0,
-      })
+    set((s) => ({ messages: [...s.messages, userMsg], isTyping: true }))
+    setTimeout(() => set((s) => ({ messages: s.messages.map((m) => m.id === userMsg.id ? { ...m, status: "sent" as const } : m) })), 300)
+
+    setTimeout(() => {
+      const replyId = `msg-${Date.now()}-img-r`
+      const replyMsg: ChatMessage = { id: replyId, role: "assistant", content: "", timestamp: new Date(), isStreaming: true }
+      set((s) => ({ messages: [...s.messages, replyMsg] }))
+      const text = images.length === 1
+        ? "收到图片，让我看看。你需要我对这张图片做什么处理吗？"
+        : `收到 ${images.length} 张图片。你需要我对这些图片做什么处理吗？`
+      trackStream("img-reply", text,
+        (t) => set((s) => ({ messages: s.messages.map((m) => m.id === replyId ? { ...m, content: t } : m) })),
+        () => {
+          set((s) => ({ isTyping: false, messages: s.messages.map((m) => m.id === replyId ? { ...m, isStreaming: false } : m) }))
+          syncSession(get, set)
+        },
+      )
+    }, humanDelay(600))
+  },
+
+  requestPermission: (type) => {
+    const s = get()
+    if (s.permissions[type] !== "not-requested") return
+    if (s.activePermission) {
+      set((s) => ({ permissionQueue: [...s.permissionQueue, type] }))
+    } else {
+      set({ activePermission: type })
     }
   },
 
+  requestPermissions: (types) => {
+    const s = get()
+    const needed = types.filter((t) => s.permissions[t] === "not-requested")
+    if (needed.length === 0) return
+    const [first, ...rest] = needed
+    set({ activePermission: first, permissionQueue: [...s.permissionQueue, ...rest] })
+  },
+
+  respondPermission: (status) => {
+    const s = get()
+    if (!s.activePermission) return
+    const newPerms = { ...s.permissions, [s.activePermission]: status }
+    const queue = [...s.permissionQueue]
+    const next = queue.shift() ?? null
+    set({ permissions: newPerms, activePermission: next, permissionQueue: queue })
+  },
+
+  initPermissions: () => {
+    if (get().permissionsInitialized) return
+    set({ permissionsInitialized: true })
+    setTimeout(() => {
+      get().requestPermissions(["network", "tracking", "notifications"])
+    }, 600)
+  },
+
+  checkPermission: (type) => get().permissions[type],
+
+  goBack: () => {
+    const s = get()
+    const history = [...s.pageHistory]
+    const prev = history.pop() ?? "tabs"
+
+    const updates: Partial<AppState> = { pageView: prev, pageHistory: history }
+
+    if (s.pageView === "agent-detail") {
+      updates.detailAgentId = null
+    }
+    if (s.pageView === "result-detail") {
+      // activeResult 延迟清除，避免打断退出动画
+    }
+    if (s.pageView === "conversation") {
+      clearAllStreams()
+      syncSession(get, set)
+      const isExecuting = s.taskState === "executing" || s.taskState === "authorizing"
+      Object.assign(updates, {
+        activeSessionId: null, messages: [], isTyping: false,
+        taskState: isExecuting ? s.taskState : "idle",
+        taskPhases: isExecuting ? s.taskPhases : [],
+        taskPaused: false, clarifyStep: 0,
+        activeTab: "create",
+      })
+    }
+
+    set(() => updates)
+  },
+
   newChat: () => {
-    const id = `session-${Date.now()}-${++counter}`
-    set({ pageView: "conversation", activeSessionId: id, messages: [], isTyping: false, inputValue: "", taskState: "idle", taskPhases: [], taskPaused: false, clarifyStep: 0 })
+    const id = `session-${uid()}`
+    set((s) => ({
+      pageView: "conversation", activeSessionId: id, messages: [], isTyping: false,
+      inputValue: "", taskState: "idle", taskPhases: [], taskPaused: false, clarifyStep: 0,
+      pageHistory: [...s.pageHistory, s.pageView],
+    }))
   },
 
   openSession: (id) => {
     const session = get().sessions.find((s) => s.id === id)
     if (!session) return
-    set({
+    set((s) => ({
       pageView: "conversation", activeSessionId: id, messages: session.messages,
       isTyping: false, inputValue: "", taskState: session.taskState,
       taskPhases: session.taskPhases ?? [], taskPaused: false, clarifyStep: 0,
-    })
+      pageHistory: [...s.pageHistory, s.pageView],
+    }))
   },
 
   deleteSession: (id) => set((s) => ({ sessions: s.sessions.filter((ss) => ss.id !== id) })),
@@ -305,7 +459,7 @@ export const useChatStore = create<AppState>((set, get) => ({
   /* ── Send message: detect task vs chat ── */
   sendMessage: (content) => {
     let sid = get().activeSessionId
-    if (!sid) { sid = `session-${Date.now()}-${++counter}`; set({ activeSessionId: sid, pageView: "conversation" }) }
+    if (!sid) { sid = `session-${uid()}`; set((s) => ({ activeSessionId: sid, pageView: "conversation", pageHistory: [...s.pageHistory, s.pageView] })) }
 
     const userMsg: ChatMessage = { id: `msg-${Date.now()}-u`, role: "user", content, timestamp: new Date(), status: "sending" }
     set((s) => ({ messages: [...s.messages, userMsg], inputValue: "", isTyping: true }))
@@ -313,6 +467,7 @@ export const useChatStore = create<AppState>((set, get) => ({
 
     const tState = get().taskState
     const isTask = isTaskRequest(content)
+    const isDismiss = /跳过|取消|不用了|算了|就这样/.test(content)
 
     if ((tState === "idle" || tState === "completed") && isTask) {
       setTimeout(() => {
@@ -320,33 +475,88 @@ export const useChatStore = create<AppState>((set, get) => ({
         const ackMsg: ChatMessage = { id: ackId, role: "assistant", content: "", timestamp: new Date(), isStreaming: true }
         set((s) => ({ messages: [...s.messages, ackMsg] }))
         const ackText = "收到，我来帮你处理这个任务。在开始之前，我需要确认几个细节：\n"
-        streamText(ackText, (t) => set((s) => ({ messages: s.messages.map((m) => m.id === ackId ? { ...m, content: t } : m) })), () => {
+        trackStream("ack", ackText, (t) => set((s) => ({ messages: s.messages.map((m) => m.id === ackId ? { ...m, content: t } : m) })), () => {
           set((s) => ({
             isTyping: false,
             messages: s.messages.map((m) => m.id === ackId ? { ...m, isStreaming: false } : m),
           }))
+          syncSession(get, set)
           setTimeout(() => {
             const card = DEMO_CLARIFY_CARDS[0]
             const clarifyMsg: ChatMessage = { id: `msg-${Date.now()}-cl`, role: "assistant", content: card.question, timestamp: new Date(), clarifyCard: card }
             set((s) => ({ messages: [...s.messages, clarifyMsg], taskState: "clarifying", clarifyStep: 0 }))
+            syncSession(get, set)
           }, 300)
         })
       }, humanDelay(500))
+    } else if (tState === "clarifying" && isDismiss) {
+      setTimeout(() => {
+        const replyId = `msg-${Date.now()}-cl-r`
+        const replyMsg: ChatMessage = { id: replyId, role: "assistant", content: "", timestamp: new Date(), isStreaming: true }
+        set((s) => ({ messages: [...s.messages, replyMsg] }))
+        trackStream("clarify-dismiss", "好的，已跳过。有其他需要随时告诉我。", (t) => set((s) => ({ messages: s.messages.map((m) => m.id === replyId ? { ...m, content: t } : m) })), () => {
+          set((s) => ({
+            isTyping: false, taskState: "idle" as const, clarifyStep: 0, taskPhases: [],
+            messages: s.messages.map((m) => m.id === replyId ? { ...m, isStreaming: false } : m),
+          }))
+          syncSession(get, set)
+        })
+      }, humanDelay(400))
+    } else if (tState === "confirming" && isDismiss) {
+      setTimeout(() => {
+        const replyId = `msg-${Date.now()}-cf-r`
+        const replyMsg: ChatMessage = { id: replyId, role: "assistant", content: "", timestamp: new Date(), isStreaming: true }
+        set((s) => ({ messages: [...s.messages, replyMsg] }))
+        trackStream("confirm-dismiss", "好的，已取消。有其他需要随时告诉我。", (t) => set((s) => ({ messages: s.messages.map((m) => m.id === replyId ? { ...m, content: t } : m) })), () => {
+          set((s) => ({
+            isTyping: false, taskState: "idle" as const, clarifyStep: 0, taskPhases: [],
+            messages: s.messages.map((m) => m.id === replyId ? { ...m, isStreaming: false } : m),
+          }))
+          syncSession(get, set)
+        })
+      }, humanDelay(400))
+    } else if (tState === "authorizing" && isDismiss) {
+      setTimeout(() => {
+        const replyId = `msg-${Date.now()}-auth-skip`
+        const replyMsg: ChatMessage = { id: replyId, role: "assistant", content: "", timestamp: new Date(), isStreaming: true }
+        set((s) => ({ messages: [...s.messages, replyMsg] }))
+        trackStream("auth-dismiss", "好的，已跳过授权。相关功能可能受限。", (t) => set((s) => ({ messages: s.messages.map((m) => m.id === replyId ? { ...m, content: t } : m) })), () => {
+          const newPhases = get().taskPhases.map((p) => p.authType && p.status !== "done" ? { ...p, status: "error" as const } : p)
+          set((s) => ({
+            isTyping: false, taskState: "idle" as const, taskPhases: newPhases,
+            messages: s.messages.map((m) => m.id === replyId ? { ...m, isStreaming: false } : m),
+          }))
+          syncSession(get, set)
+        })
+      }, humanDelay(400))
+    } else if (tState === "completed" && isDismiss) {
+      setTimeout(() => {
+        const replyId = `msg-${Date.now()}-done-r`
+        const replyMsg: ChatMessage = { id: replyId, role: "assistant", content: "", timestamp: new Date(), isStreaming: true }
+        set((s) => ({ messages: [...s.messages, replyMsg] }))
+        trackStream("done-dismiss", "好的。有需要随时告诉我。", (t) => set((s) => ({ messages: s.messages.map((m) => m.id === replyId ? { ...m, content: t } : m) })), () => {
+          set((s) => ({
+            isTyping: false, taskState: "idle" as const,
+            messages: s.messages.map((m) => m.id === replyId ? { ...m, isStreaming: false } : m),
+          }))
+          syncSession(get, set)
+        })
+      }, humanDelay(400))
     } else if (tState === "executing" || tState === "authorizing") {
       setTimeout(() => {
         const replyId = `msg-${Date.now()}-r`
         const replyMsg: ChatMessage = { id: replyId, role: "assistant", content: "", timestamp: new Date(), isStreaming: true }
         set((s) => ({ messages: [...s.messages, replyMsg] }))
         const text = "收到你的补充信息，我会在执行中考虑进去。当前任务仍在进行中。"
-        streamText(text, (t) => set((s) => ({ messages: s.messages.map((m) => m.id === replyId ? { ...m, content: t } : m) })), () => {
+        trackStream("reply", text, (t) => set((s) => ({ messages: s.messages.map((m) => m.id === replyId ? { ...m, content: t } : m) })), () => {
           set((s) => ({ isTyping: false, messages: s.messages.map((m) => m.id === replyId ? { ...m, isStreaming: false } : m) }))
+          syncSession(get, set)
         })
       }, humanDelay(400))
     } else if (tState === "paused") {
       const isResume = /继续构建|恢复/.test(content)
       const isRestart = /从头|重新构建/.test(content)
       const isViewData = /查看|已收集/.test(content)
-      const isDismiss = /不用了|就这样|取消|跳过/.test(content)
 
       setTimeout(() => {
         const replyId = `msg-${Date.now()}-pr`
@@ -385,7 +595,7 @@ export const useChatStore = create<AppState>((set, get) => ({
           text = "收到。任务目前处于暂停状态，你可以选择继续构建、从头开始或查看已收集的数据。"
         }
 
-        streamText(text, (t) => set((s) => ({ messages: s.messages.map((m) => m.id === replyId ? { ...m, content: t } : m) })), () => {
+        trackStream("paused-reply", text, (t) => set((s) => ({ messages: s.messages.map((m) => m.id === replyId ? { ...m, content: t } : m) })), () => {
           set((s) => ({ isTyping: false, messages: s.messages.map((m) => m.id === replyId ? { ...m, isStreaming: false } : m) }))
           if (afterAction) setTimeout(afterAction, 200)
           syncSession(get, set)
@@ -397,7 +607,7 @@ export const useChatStore = create<AppState>((set, get) => ({
         const replyMsg: ChatMessage = { id: replyId, role: "assistant", content: "", timestamp: new Date(), isStreaming: true }
         set((s) => ({ messages: [...s.messages, replyMsg] }))
         const text = pickRandom(CHAT_REPLIES)
-        streamText(text, (t) => set((s) => ({ messages: s.messages.map((m) => m.id === replyId ? { ...m, content: t } : m) })), () => {
+        trackStream("chat", text, (t) => set((s) => ({ messages: s.messages.map((m) => m.id === replyId ? { ...m, content: t } : m) })), () => {
           set((s) => ({ isTyping: false, messages: s.messages.map((m) => m.id === replyId ? { ...m, isStreaming: false } : m) }))
           syncSession(get, set)
         })
@@ -416,6 +626,7 @@ export const useChatStore = create<AppState>((set, get) => ({
         const nextCard = DEMO_CLARIFY_CARDS[step + 1]
         const msg: ChatMessage = { id: `msg-${Date.now()}-cl2`, role: "assistant", content: nextCard.question, timestamp: new Date(), clarifyCard: nextCard }
         set((s) => ({ messages: [...s.messages, msg], clarifyStep: step + 1 }))
+        syncSession(get, set)
       }, 400)
     } else {
       set({ isTyping: true })
@@ -426,6 +637,7 @@ export const useChatStore = create<AppState>((set, get) => ({
           timestamp: new Date(), buildPlan: DEMO_BUILD_PLAN,
         }
         set((s) => ({ messages: [...s.messages, planMsg], isTyping: false, taskState: "confirming" }))
+        syncSession(get, set)
       }, 600)
     }
   },
@@ -450,7 +662,7 @@ export const useChatStore = create<AppState>((set, get) => ({
         const explainMsg: ChatMessage = { id: explainId, role: "assistant", content: "", timestamp: new Date(), isStreaming: true }
         set((s) => ({ messages: [...s.messages, explainMsg] }))
         const explainText = `好的，将挖掘 Ryan Kay（Refer.io 频道首席教育官/主持人，公司 CEO 为 Ryan Kohler）的所有电话、邮箱及线上社交媒体轨迹，涵盖领英、推特等各类社交媒体。分析其在不同社交媒体上的活跃度，找出最有效的触达方式，并将最终结果写入一个 Notion 文档。\n\n本次研究大约需要 ${DEMO_BUILD_PLAN.estimatedTime}，生成好后我会主动发送给你。在此期间你可以继续发新消息或离开当前对话。`
-        streamText(explainText, (t) => set((s) => ({ messages: s.messages.map((m) => m.id === explainId ? { ...m, content: t } : m) })), () => {
+        trackStream("explain", explainText, (t) => set((s) => ({ messages: s.messages.map((m) => m.id === explainId ? { ...m, content: t } : m) })), () => {
           const progressMsg: ChatMessage = { id: `msg-${Date.now()}-prog`, role: "assistant", content: "", timestamp: new Date(), isProgressCard: true, progressPhases: phases }
           set((s) => ({
             isTyping: false,
@@ -458,6 +670,7 @@ export const useChatStore = create<AppState>((set, get) => ({
             taskState: "executing",
             taskPhases: phases,
           }))
+          syncSession(get, set)
           startExecution(set, get)
         })
       }, humanDelay(500))
@@ -480,7 +693,7 @@ export const useChatStore = create<AppState>((set, get) => ({
           const goMsg: ChatMessage = { id: goId, role: "assistant", content: "", timestamp: new Date(), isStreaming: true }
           set((s) => ({ messages: [...s.messages, goMsg] }))
           const goText = `所有授权完成！现在开始执行任务。\n\n本次研究大约需要 ${DEMO_BUILD_PLAN.estimatedTime}，生成好后我会主动发送给你。在此期间你可以继续发新消息或离开当前对话。`
-          streamText(goText, (t) => set((s) => ({ messages: s.messages.map((m) => m.id === goId ? { ...m, content: t } : m) })), () => {
+          trackStream("auth-go", goText, (t) => set((s) => ({ messages: s.messages.map((m) => m.id === goId ? { ...m, content: t } : m) })), () => {
             const progressMsg: ChatMessage = {
               id: `msg-${Date.now()}-prog`, role: "assistant", content: "",
               timestamp: new Date(), isProgressCard: true,
@@ -490,6 +703,7 @@ export const useChatStore = create<AppState>((set, get) => ({
               messages: [...s.messages.map((m) => m.id === goId ? { ...m, isStreaming: false } : m), progressMsg],
               taskState: "executing",
             }))
+            syncSession(get, set)
             startExecution(set, get)
           })
         }, 400)
@@ -516,6 +730,7 @@ export const useChatStore = create<AppState>((set, get) => ({
 
   /* ── Stop / Resume ── */
   stopTask: () => {
+    ++currentExecutionId
     set((s) => {
       const donePhases = s.taskPhases.filter((p) => p.status === "done" && !p.authType)
       const doneChildren = s.taskPhases.flatMap((p) => (p.children ?? []).filter((c) => c.status === "done"))
@@ -580,6 +795,11 @@ function startExecution(
   set: (fn: (s: AppState) => Partial<AppState>) => void,
   get: () => AppState,
 ) {
+  const execId = ++currentExecutionId
+  set(() => ({ executionId: execId }))
+
+  const isStale = () => currentExecutionId !== execId || get().taskPaused || get().taskState !== "executing"
+
   const phases = get().taskPhases
   const pending = getAllPending(phases)
   if (pending.length === 0) {
@@ -612,7 +832,7 @@ function startExecution(
 
     const d = delay
     setTimeout(() => {
-      if (get().taskPaused || get().taskState !== "executing") return
+      if (isStale()) return
       set((s) => {
         const np = updatePhaseStatus(s.taskPhases, item.id, "running")
         return {
@@ -623,7 +843,7 @@ function startExecution(
       })
 
       setTimeout(() => {
-        if (get().taskPaused || get().taskState !== "executing") return
+        if (isStale()) return
         set((s) => {
           const np = updatePhaseStatus(s.taskPhases, item.id, "done")
           return {
@@ -648,7 +868,10 @@ function startExecution(
 
   if (hitAuth) {
     const pendingAuth = getNextAuthPhase(get().taskPhases)!
-    setTimeout(() => triggerAuthInterrupt(set, get, pendingAuth), delay)
+    setTimeout(() => {
+      if (isStale()) return
+      triggerAuthInterrupt(set, get, pendingAuth)
+    }, delay)
   }
 }
 
@@ -765,7 +988,7 @@ function completeTask(
           : [...existingSession.messages, ...newMsgs]
         update.sessions = s.sessions.map((ss) =>
           ss.id === executingSessionId
-            ? { ...ss, messages: updatedMessages, taskState: "completed" as const, lastMessage: DEMO_RESULT.title, updatedAt: new Date() }
+            ? { ...ss, messages: updatedMessages, taskState: "completed" as const, taskResult: DEMO_RESULT, lastMessage: DEMO_RESULT.title, updatedAt: new Date() }
             : ss,
         )
       }

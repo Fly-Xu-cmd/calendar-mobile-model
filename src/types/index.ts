@@ -1,6 +1,9 @@
+export type PermissionType = "network" | "tracking" | "notifications" | "camera" | "microphone" | "location" | "photos"
+export type PermissionStatus = "not-requested" | "granted" | "denied" | "limited"
+
 export type ChatRole = "user" | "assistant" | "system"
 export type MessageStatus = "sending" | "sent" | "failed"
-export type TabId = "chat" | "agents" | "notifications" | "profile"
+export type TabId = "agents" | "create" | "profile"
 export type PageView = "tabs" | "conversation" | "agent-detail" | "result-detail" | "progress-detail"
 
 export type TaskPhaseStatus = "pending" | "running" | "done" | "error" | "auth-required" | "paused"
@@ -51,6 +54,13 @@ export interface NextAction {
   action: string
 }
 
+export interface ImageAttachment {
+  id: string
+  src: string
+  width: number
+  height: number
+}
+
 export interface ChatMessage {
   id: string
   role: ChatRole
@@ -66,6 +76,7 @@ export interface ChatMessage {
   isProgressCard?: boolean
   isResultCard?: boolean
   nextActions?: NextAction[]
+  images?: ImageAttachment[]
 }
 
 export interface ChatSession {
@@ -94,6 +105,8 @@ export interface AgentRunLog {
   sessionId?: string
 }
 
+export type AgentStatus = "ready" | "running" | "pending"
+
 export interface AgentRecord {
   id: string
   name: string
@@ -105,6 +118,8 @@ export interface AgentRecord {
   lastRunAt: Date
   sessions: string[]
   runLogs: AgentRunLog[]
+  status: AgentStatus
+  pinned?: boolean
 }
 
 export interface AppNotification {

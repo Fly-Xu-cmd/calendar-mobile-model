@@ -258,37 +258,83 @@ function LockScreenTaskCard() {
     return steps
   }, [taskPhases])
 
-  const lastCompleted = completedSteps.length > 0 ? completedSteps[completedSteps.length - 1] : null
+  const remainingSteps = useMemo(() => {
+    const steps: string[] = []
+    taskPhases.forEach((p) => {
+      if (!p.authType && (p.status === "pending" || p.status === "running")) steps.push(p.title)
+      if (p.children) p.children.forEach((c) => { if (c.status === "pending" || c.status === "running") steps.push(c.title) })
+    })
+    return steps
+  }, [taskPhases])
 
   if (!progress || (!isActive && !isCompleted)) return null
 
+  const DOT_COUNT = 8
+
   return (
     <div className="mx-5 mt-6 w-[calc(100%-40px)]" onClick={(e) => e.stopPropagation()}>
-      <div className="rounded-2xl bg-white/15 backdrop-blur-xl border border-white/20 px-4 py-3 shadow-lg">
-        <div className="flex items-center gap-2.5">
-          <SkillHashGlyph seedText="viceme-ai" size={36} />
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-1.5">
-              <span className="text-[13px] text-white font-semibold">ViceMe</span>
-              {isActive && <Loader2 className="size-3 text-blue-300 animate-spin" />}
-              {isCompleted && <CheckCircle2 className="size-3 text-green-300" />}
+      <div className="rounded-2xl bg-white/15 backdrop-blur-xl border border-white/20 overflow-hidden shadow-lg">
+        <div className="px-4 pt-3.5 pb-3">
+          {/* Header: large status + app badge */}
+          <div className="flex items-start justify-between">
+            <div className="flex-1 min-w-0">
+              <p className="text-[22px] font-bold text-white leading-tight">
+                {isCompleted ? "任务完成" : taskState === "authorizing" ? "等待授权" : taskState === "paused" ? "已暂停" : `${progress.done}/${progress.total} 步完成`}
+              </p>
+              <p className="text-[13px] text-white/60 mt-1">
+                {isCompleted
+                  ? "点击查看完整结果"
+                  : progress.currentStep
+                    ? `正在 ${progress.currentStep}`
+                    : `预计还需 ${Math.max(1, progress.total - progress.done)} 步`}
+              </p>
             </div>
-            <p className="text-[12px] text-white/70 mt-0.5 truncate">
-              {isCompleted
-                ? "任务已完成，点击查看结果"
-                : taskState === "authorizing"
-                  ? "等待授权…"
-                  : progress.currentStep || "任务执行中…"}
-            </p>
+            <div className="shrink-0 flex flex-col items-center ml-3">
+              <SkillHashGlyph seedText="viceme-ai" size={38} />
+              <span className="text-[10px] text-white/50 mt-1 font-medium">ViceMe</span>
+            </div>
           </div>
-          <span className="text-[13px] text-white/60 font-medium shrink-0">{progress.percent}%</span>
+
+          {/* Progress track with dots */}
+          <div className="mt-3 flex items-center gap-0">
+            <div className="shrink-0 flex items-center justify-center">
+              {isActive ? (
+                <Loader2 className="size-4 text-blue-400 animate-spin" />
+              ) : (
+                <CheckCircle2 className="size-4 text-green-400" />
+              )}
+            </div>
+            <div className="flex-1 flex items-center mx-2 gap-[3px]">
+              {Array.from({ length: DOT_COUNT }, (_, i) => {
+                const filled = progress.percent > 0 && i < Math.round((progress.percent / 100) * DOT_COUNT)
+                return (
+                  <div
+                    key={i}
+                    className={`flex-1 h-[4px] rounded-full transition-all duration-500 ${filled ? "bg-blue-400" : "bg-white/20"}`}
+                  />
+                )
+              })}
+            </div>
+            <span className="shrink-0 text-[14px] text-white font-bold">{progress.percent}%</span>
+          </div>
+
+          {/* Completed / remaining detail */}
+          <div className="mt-2.5 flex items-center gap-3">
+            {completedSteps.length > 0 && (
+              <span className="text-[11px] text-green-300/80">
+                ✓ {completedSteps[completedSteps.length - 1]}
+              </span>
+            )}
+            {!isCompleted && remainingSteps.length > 0 && completedSteps.length > 0 && (
+              <span className="text-[11px] text-white/40">|</span>
+            )}
+            {!isCompleted && remainingSteps.length > 0 && (
+              <span className="text-[11px] text-white/50 truncate">
+                下一步: {remainingSteps[0]}
+              </span>
+            )}
+          </div>
         </div>
-        <div className="mt-2 h-[3px] rounded-full bg-white/20 overflow-hidden">
-          <div className="h-full rounded-full bg-blue-400 transition-all duration-500" style={{ width: `${progress.percent}%` }} />
-        </div>
-        {lastCompleted && (
-          <p className="text-[11px] text-white/50 mt-2 truncate">✓ {lastCompleted}</p>
-        )}
       </div>
     </div>
   )
