@@ -4,7 +4,7 @@ import tailwindcss from "@tailwindcss/vite"
 import { fileURLToPath, URL } from "node:url"
 
 export default defineConfig({
-  base: "/calendar-mobile-model/",
+  base: "/viceme-mobile-model/",
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
